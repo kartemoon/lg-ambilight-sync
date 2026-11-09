@@ -1,4 +1,4 @@
-# lg-hue-sync
+# LG Ambilight Sync
 
 > Пользовательская версия на базе [adeze/lg-hue-sync v1.1.0](https://github.com/adeze/lg-hue-sync/tree/v1.1.0). Исходный проект и лицензия сохранены. Список добавленных функций: [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md).
 
