@@ -2,6 +2,8 @@
 
 > Пользовательская версия на базе [adeze/lg-hue-sync v1.1.0](https://github.com/adeze/lg-hue-sync/tree/v1.1.0). Исходный проект и лицензия сохранены. Список добавленных функций: [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md).
 
+[Скачать IPK](https://github.com/kartemoon/lg-ambilight-sync/releases/tag/v1.1.0-custom.1) · [Установка и обновление на LG webOS](docs/install-ipk.md)
+
 ## Что добавлено в этой версии
 
 - Полностью русская веб-панель управления.
@@ -33,7 +35,7 @@ Native ambient-light synchronization for rooted LG webOS TVs. A Rust daemon capt
 ## Limits and safety
 
 - Root access is required. Rooting can void warranties or render a TV unusable; confirm model and firmware compatibility first.
-- Capture is HDMI-only: known built-in apps and Home automatically pause capture; returning to HDMI resumes it unless manually stopped. This input policy does not detect or bypass DRM. External HDMI playback is the supported path for protected content.
+- Capture supports HDMI, the LG media player and selected built-in apps. Actual frame availability depends on the TV and content. The capture policy does not bypass DRM.
 - Hue decides how physical gradient segments are grouped into Entertainment channels. This project streams the selected area's returned channels; it does not fabricate more.
 - LG private capture APIs and community root methods are unsupported by LG and may change with firmware.
 

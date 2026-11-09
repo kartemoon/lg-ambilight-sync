@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+base=/var/home/root/lg-hue-sync
+bash "$base/provision_luna.sh" local
+mkdir -p /run/systemd/system
+cp "$base/lg-hue-sync.service" /run/systemd/system/lg-hue-sync.service
+systemctl daemon-reload
+systemctl start lg-hue-sync

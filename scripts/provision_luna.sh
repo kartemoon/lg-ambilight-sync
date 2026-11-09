@@ -12,7 +12,10 @@ SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
 
 echo "[*] Provisioning Luna permissions for org.webosbrew.lg-hue-sync on $TV_IP:$SSH_PORT..."
 
-provision_files() {
+provision_files() (
+    local staging
+    staging="$(mktemp -d /tmp/lg-hue-sync-luna.XXXXXX)"
+    trap 'rm -f "$staging/role.json" "$staging/perm.json"; rmdir "$staging"' EXIT
     mkdir -p /var/luna-service2/manifests.d /var/luna-service2/roles.d /var/luna-service2/client-permissions.d
     mkdir -p /var/luna-service2-dev/manifests.d /var/luna-service2-dev/roles.d /var/luna-service2-dev/client-permissions.d
 
@@ -48,7 +51,7 @@ JSON
 JSON
 
     # 2. Privileged Role Files (without appId)
-    cat << 'JSON' > /tmp/org.webosbrew.lg-hue-sync.role.json
+    cat << 'JSON' > "$staging/role.json"
 {
     "exeName": "/var/home/root/lg-hue-sync/lg-hue-sync",
     "type": "privileged",
@@ -88,12 +91,11 @@ JSON
     ]
 }
 JSON
-    cp -f /tmp/org.webosbrew.lg-hue-sync.role.json /var/luna-service2/roles.d/org.webosbrew.lg-hue-sync.json
-    cp -f /tmp/org.webosbrew.lg-hue-sync.role.json /var/luna-service2-dev/roles.d/org.webosbrew.lg-hue-sync.json
-    rm -f /tmp/org.webosbrew.lg-hue-sync.role.json
+    cp -f "$staging/role.json" /var/luna-service2/roles.d/org.webosbrew.lg-hue-sync.json
+    cp -f "$staging/role.json" /var/luna-service2-dev/roles.d/org.webosbrew.lg-hue-sync.json
 
     # 3. Client Permissions
-    cat << 'JSON' > /tmp/org.webosbrew.lg-hue-sync.perm.json
+    cat << 'JSON' > "$staging/perm.json"
 {
     "org.webosbrew.lg-hue-sync*": [
         "all"
@@ -112,13 +114,12 @@ JSON
     ]
 }
 JSON
-    cp -f /tmp/org.webosbrew.lg-hue-sync.perm.json /var/luna-service2/client-permissions.d/org.webosbrew.lg-hue-sync.json
-    cp -f /tmp/org.webosbrew.lg-hue-sync.perm.json /var/luna-service2-dev/client-permissions.d/org.webosbrew.lg-hue-sync.json
-    rm -f /tmp/org.webosbrew.lg-hue-sync.perm.json
+    cp -f "$staging/perm.json" /var/luna-service2/client-permissions.d/org.webosbrew.lg-hue-sync.json
+    cp -f "$staging/perm.json" /var/luna-service2-dev/client-permissions.d/org.webosbrew.lg-hue-sync.json
 
     ls-control scan-services
     echo "[+] Luna permissions provisioned and scanned successfully."
-}
+)
 
 if [ "$TV_IP" = "local" ] || [ "$TV_IP" = "localhost" ] || [ "$TV_IP" = "127.0.0.1" ]; then
     echo "[*] Provisioning Luna permissions locally..."

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the launcher with Rust Ares and retain its Homebrew manifest."""
+"""Package the webOS app with Rust Ares and retain its Homebrew manifest."""
 import argparse
 import hashlib
 import json
@@ -28,7 +28,7 @@ def build_ipk(app_dir=APP_DIR, output_dir=OUTPUT_DIR):
         raise ValueError("invalid application id")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", info["version"]):
         raise ValueError("application version must contain three numeric components")
-    packager = shutil.which("ares-rs-package")
+    packager = shutil.which("ares-rs-package") or shutil.which("ares-package")
     if not packager:
         raise RuntimeError("ares-rs-package is required; install the Rust ares-cli-rs tools")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,12 +59,33 @@ def build_ipk(app_dir=APP_DIR, output_dir=OUTPUT_DIR):
     return output_ipk, output_manifest
 
 
+def build_bundle(daemon):
+    with tempfile.TemporaryDirectory(prefix="lg-hue-sync-ipk-") as temporary:
+        app = Path(temporary) / "app"
+        shutil.copytree(APP_DIR, app)
+        payload = app / "payload"
+        payload.mkdir()
+        scripts = ROOT_DIR / "scripts"
+        for source, destination, mode in (
+            (daemon, payload / "lg-hue-sync", 0o755),
+            (scripts / "provision_luna.sh", payload / "provision_luna.sh", 0o755),
+            (scripts / "ipk/lg-hue-sync.service", payload / "lg-hue-sync.service", 0o644),
+            (scripts / "ipk/50-lg-hue-sync", payload / "50-lg-hue-sync", 0o755),
+            (scripts / "ipk/install-daemon.sh", app / "install-daemon.sh", 0o755),
+            (ROOT_DIR / "LICENSE", app / "LICENSE", 0o644),
+        ):
+            shutil.copyfile(source, destination)
+            destination.chmod(mode)
+        return build_ipk(app)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--print-path", action="store_true", help="package and print only the exact IPK path to stdout")
+    parser.add_argument("--daemon", type=Path, help="bundle a built ARMv7 daemon and its root activation script")
     args = parser.parse_args()
     try:
-        package, manifest = build_ipk()
+        package, manifest = build_ipk() if args.daemon is None else build_bundle(args.daemon)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Packaging failed: {error}\n")
     if args.print_path:
