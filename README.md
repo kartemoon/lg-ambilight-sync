@@ -1,36 +1,42 @@
 # LG Hue Sync Custom
 
-> Пользовательская версия на базе [adeze/lg-hue-sync v1.1.0](https://github.com/adeze/lg-hue-sync/tree/v1.1.0). Исходный проект и лицензия сохранены. Список добавленных функций: [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md).
+Подсветка в цвет экрана для LG webOS с русской панелью управления. Поддерживает **Philips Hue Entertainment**, **Nanoleaf 4D** и торшер **Govee C60B0** через мост ESP32-S3.
 
-[Скачать IPK](https://github.com/kartemoon/lg-hue-sync-custom/releases/tag/v1.1.0-custom.1) · [Установка и обновление на LG webOS](docs/install-ipk.md)
+[![Скачать IPK](https://img.shields.io/badge/Download-IPK-6D5CE7?style=for-the-badge)](https://github.com/kartemoon/lg-hue-sync-custom/releases/latest)
+[![LG webOS](https://img.shields.io/badge/LG_webOS-root_required-B62652?style=for-the-badge)](docs/install-ipk.md)
+[![License MIT](https://img.shields.io/badge/License-MIT-288567?style=for-the-badge)](LICENSE)
 
-## Что добавлено в этой версии
+[Установка и обновление](docs/install-ipk.md) · [Калибровка Nanoleaf](CUSTOM_CHANGES.md#калибровка-nanoleaf-4d) · [Список доработок](CUSTOM_CHANGES.md)
 
-- Полностью русская веб-панель управления.
-- Nanoleaf 4D: захват изображения, [настройка расположения ленты и калибровка краёв](CUSTOM_CHANGES.md#калибровка-nanoleaf-4d), компенсация чёрных полос, фоновое свечение и музыкальные вспышки.
-- Захват HDMI, встроенного медиаплеера LG, YouTube, Кинопоиска, Lampa и Иви с отдельными переключателями.
-- Автоматические 60 FPS для HDMI, восстановление после зависания захвата и полный перезапуск из панели.
-- Автоматическое включение подсветки вместе с телевизором и возврат к статическому цвету или сцене на домашнем экране.
-- Управление торшером **Govee C60B0** через отдельный **ESP32-S3**: телевизор передаёт цвет и силу музыкального импульса контроллеру по локальной сети, а ESP32 управляет торшером через **Bluetooth Low Energy (BLE)**.
-- Для Govee C60B0 раздельно управляются цвет, кольцо и верхний свет; музыкальный режим добавляет независимые плавные вспышки с настройкой чувствительности и яркости.
+![Русская панель LG Hue Sync Custom с предпросмотром цвета](docs/screenshots/dashboard-ru.png)
 
-> Прошивка ESP32 для Govee C60B0 — отдельная часть системы и пока не входит в этот репозиторий. LG Hue Sync предоставляет для неё данные через API: `lamp_music_mix` и `lamp_top_music_mix`.
+## Что умеет
 
-[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![CI](https://github.com/adeze/lg-hue-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/adeze/lg-hue-sync/actions/workflows/ci.yml)
-[![webOS](https://img.shields.io/badge/webOS-rooted%205%2F6-blue.svg)](https://www.webosbrew.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+- **Захват изображения.** HDMI, медиаплеер LG, YouTube, Кинопоиск, Lampa и Иви. Встроенные приложения можно включать отдельно. Для HDMI доступен режим до 60 FPS.
+- **Nanoleaf 4D и Hue.** Предпросмотр зон, компенсация чёрных полос, настройка положения ленты и фоновые сцены, когда захват на паузе.
+- **Музыкальная синхронизация.** Плавные импульсы для ленты и торшера. Цвет и параметры эффекта идут по локальной сети на ESP32-S3, который управляет Govee C60B0 по BLE. Для торшера нужна отдельная прошивка моста.
+- **Управление с телефона или ПК.** Настройки цвета и отклика, диагностика и перезапуск службы из браузера.
 
-Native ambient-light synchronization for rooted LG webOS TVs. A Rust daemon captures the displayed image, derives spatial colours, and streams them to Philips Hue Entertainment and Nanoleaf 4D. A responsive LAN dashboard provides pairing, calibration, presets, and independent output controls.
+## Русский интерфейс
 
-## Features
+| Музыкальный режим | Калибровка ленты |
+| :---: | :---: |
+| ![Настройки музыкальных импульсов для ленты, кольца и верхнего света](docs/screenshots/music-ru.png) | ![Настройка начала, направления и смещения ленты Nanoleaf](docs/screenshots/nanoleaf-ru.png) |
 
-- Root-only webOS capture through dynamically loaded `libvtcapture`/`dile_vt` APIs.
-- Hue Entertainment API v2 over DTLS 1.2 PSK, including gradient member identity.
-- Nanoleaf 4D UDP streaming with 40-panel corner, direction, and offset alignment.
-- Independent Hue/Nanoleaf controls; TV sleep/wake following can be automatic or manual.
-- Letterbox-aware sampling, an optional legacy midtone lift, OLED black gating, smoothing, and bounded scene changes.
-- Responsive dashboard at `http://<tv-ip>:8088/` with system, dark, and light themes.
+На скриншотах показан локальный деморежим с тестовыми данными.
+
+## Быстрый старт
+
+1. Скачайте IPK и `SHA256SUMS` со [страницы релиза](https://github.com/kartemoon/lg-hue-sync-custom/releases/latest).
+2. Установите пакет на LG webOS с root-доступом и активируйте службу через SSH. Команды есть в [инструкции по установке](docs/install-ipk.md).
+3. Откройте `http://<IP-телевизора>:8088/` в домашней сети и подключите подсветку.
+
+Совместимость захвата зависит от модели, прошивки и контента. Приложение не обходит DRM.
+
+Проект основан на [adeze/lg-hue-sync v1.1.0](https://github.com/adeze/lg-hue-sync/tree/v1.1.0). Лицензия MIT сохранена.
+
+<details>
+<summary>Техническая документация, сборка и обслуживание</summary>
 
 ## Limits and safety
 
@@ -120,7 +126,6 @@ src/                 daemon, capture, colour, Hue, Nanoleaf, dashboard
 webos-app/           optional launcher/dashboard package
 scripts/             build, provisioning, deployment, maintenance
 docs/                architecture, operations, release runbooks
-.agents/skills/      repository-specific agent workflow
 ```
 
 Useful implementation references:
@@ -132,6 +137,8 @@ Useful implementation references:
 - [webosbrew/ares-cli-rs](https://github.com/webosbrew/ares-cli-rs) — packaging, install, shell, and transfer tooling.
 - [HyperHDR](https://github.com/awawa-dev/HyperHDR) — reference for colour precision, temporal smoothing, source calibration, and stage metrics; adapt only after measuring this TV's pipeline.
 - [webosbrew/apps-repo](https://github.com/webosbrew/apps-repo) — Homebrew Channel submission format.
+
+</details>
 
 ## Contributing
 
