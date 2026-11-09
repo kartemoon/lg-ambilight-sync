@@ -1,8 +1,8 @@
-# LG Ambilight Sync
+# LG Hue Sync Custom
 
 > Пользовательская версия на базе [adeze/lg-hue-sync v1.1.0](https://github.com/adeze/lg-hue-sync/tree/v1.1.0). Исходный проект и лицензия сохранены. Список добавленных функций: [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md).
 
-[Скачать IPK](https://github.com/kartemoon/lg-ambilight-sync/releases/tag/v1.1.0-custom.1) · [Установка и обновление на LG webOS](docs/install-ipk.md)
+[Скачать IPK](https://github.com/kartemoon/lg-hue-sync-custom/releases/tag/v1.1.0-custom.1) · [Установка и обновление на LG webOS](docs/install-ipk.md)
 
 ## Что добавлено в этой версии
 

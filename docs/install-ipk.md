@@ -1,8 +1,8 @@
-# Установка LG Ambilight Sync из IPK
+# Установка LG Hue Sync Custom из IPK
 
 Пакет содержит приложение webOS, ARMv7-демон и встроенную русскую веб-панель. Требуется LG webOS с root-доступом, Homebrew Channel и включённым root SSH. Совместимость захвата зависит от модели и прошивки ТВ. Для торшера Govee C60B0 нужен отдельно настроенный мост ESP32-S3.
 
-1. Скачайте IPK и `SHA256SUMS` со [страницы релиза](https://github.com/kartemoon/lg-ambilight-sync/releases/tag/v1.1.0-custom.1). В каталоге загрузки выполните `sha256sum -c SHA256SUMS`.
+1. Скачайте IPK и `SHA256SUMS` со [страницы релиза](https://github.com/kartemoon/lg-hue-sync-custom/releases/tag/v1.1.0-custom.1). В каталоге загрузки выполните `sha256sum -c SHA256SUMS`.
 2. Установите IPK через [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) или командой:
 
    ```sh
