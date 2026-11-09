@@ -1,0 +1,825 @@
+use anyhow::{anyhow, Context, Result};
+use libloading::{Library, Symbol};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::path::Path;
+use tracing::{error, info, warn};
+
+use super::{CaptureError, CapturedFrame, NativeCaptureError, ScreenCapture};
+
+pub const LIBVTCAPTURE_PATH: &str = "/usr/lib/libvtcapture.so.1";
+
+/// Properties passed to `vtCapture_preprocess` (20 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibVtCaptureProperties {
+    /// 0 = SCALER_INPUT (HDMI video stream before scaler)
+    /// 1 = SCALER_OUTPUT (after hardware scaler)
+    /// 2 = DISPLAY_OUTPUT (composited display output)
+    pub dump: c_int,
+    pub loc_x: i16,
+    pub loc_y: i16,
+    pub reg_w: i16,
+    pub reg_h: i16,
+    pub buf_cnt: c_int,
+    pub frm: c_int,
+}
+
+/// Plane layout information returned by `vtCapture_planeInfo` (20 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibVtCapturePlaneInfo {
+    pub stride: c_int,
+    pub plane_x: i16,
+    pub plane_y: i16,
+    pub plane_w: i16,
+    pub plane_h: i16,
+    pub active_x: i16,
+    pub active_y: i16,
+    pub active_w: i16,
+    pub active_h: i16,
+}
+
+/// Active frame buffer memory addresses from `vtCapture_currentCaptureBuffInfo` (16 bytes on 32-bit ARM).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LibVtCaptureBufferInfo {
+    /// Pointer to Y plane (luma)
+    pub start_addr0: *mut u8,
+    /// Pointer to UV interleaved plane (chroma NV12)
+    pub start_addr1: *mut u8,
+    pub size0: c_int,
+    pub size1: c_int,
+}
+
+type FnVtCaptureCreate = unsafe extern "C" fn() -> *mut c_void;
+type FnVtCaptureInit = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char) -> c_int;
+type FnVtCapturePreprocess =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const LibVtCaptureProperties) -> c_int;
+type FnVtCapturePlaneInfo =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut LibVtCapturePlaneInfo) -> c_int;
+type FnVtCaptureProcess = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type FnVtCaptureCurrentCaptureBuffInfo =
+    unsafe extern "C" fn(*mut c_void, *mut LibVtCaptureBufferInfo) -> c_int;
+type FnVtCaptureStop = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type FnVtCapturePostprocess = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type FnVtCaptureFinalize = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+/// Native libvtcapture driver implementation for LG webOS 6.x (LG C1 OLED).
+pub struct VtCapture {
+    driver: *mut c_void,
+    client_id: [u8; 128],
+    width: u32,
+    height: u32,
+    stride: u32,
+    rgb_buffer: Vec<u8>,
+    is_stopped: bool,
+    last_addr0: usize,
+    stale_count: u32,
+    raw_stats_enabled: bool,
+    last_raw_stats: Option<RawNv12Stats>,
+    fn_current_buff_info: FnVtCaptureCurrentCaptureBuffInfo,
+    fn_stop: FnVtCaptureStop,
+    fn_postprocess: FnVtCapturePostprocess,
+    fn_finalize: FnVtCaptureFinalize,
+    fn_release: FnVtCaptureRelease,
+    _lib: Library,
+}
+
+/// Aggregate of a central, at-most-16x16 NV12 patch; no frame pixels are retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawNv12Stats {
+    pub y_min: u8,
+    pub y_mean: f32,
+    pub y_max: u8,
+    pub u_mean: f32,
+    pub v_mean: f32,
+    pub luma_samples: u16,
+}
+
+fn central_nv12_stats(
+    width: u32,
+    height: u32,
+    stride: u32,
+    y_plane: &[u8],
+    uv_plane: &[u8],
+) -> Result<RawNv12Stats> {
+    let (y_len, uv_len, _) = nv12_lengths(width, height, stride)?;
+    if y_plane.len() < y_len || uv_plane.len() < uv_len {
+        return Err(anyhow!("NV12 plane is too short for raw statistics"));
+    }
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    let x0 = (w.saturating_sub(16) / 2) & !1;
+    let y0 = (h.saturating_sub(16) / 2) & !1;
+    let x1 = (x0 + 16).min(w);
+    let y1 = (y0 + 16).min(h);
+    let mut y_min = u8::MAX;
+    let mut y_max = u8::MIN;
+    let mut y_sum = 0u32;
+    for row in y0..y1 {
+        for &value in &y_plane[row * s + x0..row * s + x1] {
+            y_min = y_min.min(value);
+            y_max = y_max.max(value);
+            y_sum += u32::from(value);
+        }
+    }
+    let mut u_sum = 0u32;
+    let mut v_sum = 0u32;
+    let mut chroma_samples = 0u32;
+    for row in (y0..y1).step_by(2) {
+        for col in (x0..x1).step_by(2) {
+            let offset = row / 2 * s + col;
+            u_sum += u32::from(uv_plane[offset]);
+            v_sum += u32::from(uv_plane[offset + 1]);
+            chroma_samples += 1;
+        }
+    }
+    let luma_samples = ((x1 - x0) * (y1 - y0)) as u16;
+    Ok(RawNv12Stats {
+        y_min,
+        y_mean: y_sum as f32 / f32::from(luma_samples),
+        y_max,
+        u_mean: u_sum as f32 / chroma_samples as f32,
+        v_mean: v_sum as f32 / chroma_samples as f32,
+        luma_samples,
+    })
+}
+
+impl VtCapture {
+    pub fn enable_raw_stats(&mut self) {
+        self.raw_stats_enabled = true;
+    }
+
+    pub fn take_raw_stats(&mut self) -> Option<RawNv12Stats> {
+        self.last_raw_stats.take()
+    }
+
+    /// Attempts to dynamically load `/usr/lib/libvtcapture.so.1` and initialize the capture pipeline.
+    pub fn try_new(target_width: u32, target_height: u32) -> Result<Self> {
+        if target_width == 0
+            || target_height == 0
+            || target_width > i16::MAX as u32
+            || target_height > i16::MAX as u32
+        {
+            return Err(anyhow!("capture dimensions exceed libvtcapture limits"));
+        }
+        nv12_lengths(target_width, target_height, target_width + target_width % 2)?;
+        if !Path::new(LIBVTCAPTURE_PATH).exists() {
+            return Err(anyhow!(
+                "libvtcapture driver library not found at {}",
+                LIBVTCAPTURE_PATH
+            ));
+        }
+
+        info!(
+            "Loading webOS libvtcapture driver from {}...",
+            LIBVTCAPTURE_PATH
+        );
+        let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
+            .map_err(|e| anyhow!("Failed to dlopen {}: {}", LIBVTCAPTURE_PATH, e))?;
+
+        unsafe {
+            let fn_create: Symbol<FnVtCaptureCreate> = lib
+                .get(b"vtCapture_create\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_create not found: {}", e))?;
+            let fn_init: Symbol<FnVtCaptureInit> = lib
+                .get(b"vtCapture_init\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_init not found: {}", e))?;
+            let fn_preprocess: Symbol<FnVtCapturePreprocess> =
+                lib.get(b"vtCapture_preprocess\0")
+                    .map_err(|e| anyhow!("Symbol vtCapture_preprocess not found: {}", e))?;
+            let fn_plane_info: Symbol<FnVtCapturePlaneInfo> = lib
+                .get(b"vtCapture_planeInfo\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_planeInfo not found: {}", e))?;
+            let fn_process: Symbol<FnVtCaptureProcess> = lib
+                .get(b"vtCapture_process\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_process not found: {}", e))?;
+            let fn_current_buff_info: Symbol<FnVtCaptureCurrentCaptureBuffInfo> = lib
+                .get(b"vtCapture_currentCaptureBuffInfo\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_currentCaptureBuffInfo not found: {}", e))?;
+            let fn_stop: Symbol<FnVtCaptureStop> = lib
+                .get(b"vtCapture_stop\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_stop not found: {}", e))?;
+            let fn_postprocess: Symbol<FnVtCapturePostprocess> = lib
+                .get(b"vtCapture_postprocess\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_postprocess not found: {}", e))?;
+            let fn_finalize: Symbol<FnVtCaptureFinalize> = lib
+                .get(b"vtCapture_finalize\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_finalize not found: {}", e))?;
+            let fn_release: Symbol<FnVtCaptureRelease> = lib
+                .get(b"vtCapture_release\0")
+                .map_err(|e| anyhow!("Symbol vtCapture_release not found: {}", e))?;
+
+            // 1. Create driver instance
+            let driver = fn_create();
+            if driver.is_null() {
+                return Err(anyhow!("vtCapture_create returned NULL"));
+            }
+
+            // 2. Initialize with caller ID and initial "00" client ID buffer
+            let mut client_id = [0u8; 128];
+            client_id[0] = b'0';
+            client_id[1] = b'0';
+            let caller_id = CString::new("org.webosbrew.lg-hue-sync")?;
+
+            let ret_init = fn_init(
+                driver,
+                caller_id.as_ptr(),
+                client_id.as_mut_ptr() as *mut c_char,
+            );
+            if ret_init != 0 {
+                fn_release(driver);
+                if ret_init == 11 {
+                    error!(
+                        "[-] vtCapture_init returned error 11 (EAGAIN/EBUSY): /dev/video* hardware scaler is busy! Another capture process (e.g. lg-hue-sync.service, PicCap) is already running. Stop it with: systemctl stop lg-hue-sync"
+                    );
+                }
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_init",
+                    code: ret_init,
+                }
+                .into());
+            }
+
+            let client_str = match CStr::from_bytes_until_nul(&client_id) {
+                Ok(value) => value.to_string_lossy(),
+                Err(_) => {
+                    fn_release(driver);
+                    return Err(anyhow!("vtCapture_init returned an unterminated client ID"));
+                }
+            };
+            info!(
+                "[+] vtCapture_init successful (caller: {}, client_id: '{}')",
+                caller_id.to_string_lossy(),
+                client_str
+            );
+
+            // 3. Preprocess properties (try DISPLAY_OUTPUT=2 first, then SCALER_INPUT=0, then SCALER_OUTPUT=1)
+            // DISPLAY_OUTPUT taps the composited display output and does not lock the raw HDMI input clock during mode switches.
+            let mut preprocessed = false;
+            let mut last_code = -1;
+            let client_ptr = client_id.as_ptr() as *const c_char;
+
+            for dump_mode in [2, 0, 1] {
+                let props = LibVtCaptureProperties {
+                    dump: dump_mode,
+                    loc_x: 0,
+                    loc_y: 0,
+                    reg_w: target_width as i16,
+                    reg_h: target_height as i16,
+                    buf_cnt: 3,
+                    frm: 60,
+                };
+                let ret_pre = fn_preprocess(driver, client_ptr, &props);
+                if ret_pre == 0 {
+                    info!(
+                        "[+] vtCapture_preprocess succeeded (dump_mode: {}, resolution: {}x{})",
+                        dump_mode, target_width, target_height
+                    );
+                    preprocessed = true;
+                    break;
+                }
+                last_code = ret_pre;
+            }
+
+            if !preprocessed {
+                fn_finalize(driver, client_ptr);
+                fn_release(driver);
+                return Err(anyhow!(
+                    "vtCapture_preprocess failed across all dump modes (last code: {})",
+                    last_code
+                ));
+            }
+
+            // 4. Query plane layout and hardware stride
+            let mut plane_info = LibVtCapturePlaneInfo::default();
+            let ret_plane = fn_plane_info(driver, client_ptr, &mut plane_info);
+            if ret_plane != 0 {
+                warn!(
+                    "vtCapture_planeInfo returned code {}, using target width as stride",
+                    ret_plane
+                );
+            }
+
+            // Honor actual hardware-configured plane dimensions if reported, otherwise fallback to target
+            let width = if plane_info.plane_w > 0 {
+                plane_info.plane_w as u32
+            } else {
+                target_width
+            };
+            let height = if plane_info.plane_h > 0 {
+                plane_info.plane_h as u32
+            } else {
+                target_height
+            };
+
+            let stride = if plane_info.stride > 0 && plane_info.stride as u32 >= width {
+                plane_info.stride as u32
+            } else {
+                width
+            };
+
+            let rgb_size = match nv12_lengths(width, height, stride) {
+                Ok((_, _, size)) => size,
+                Err(error) => {
+                    fn_finalize(driver, client_ptr);
+                    fn_release(driver);
+                    return Err(error);
+                }
+            };
+
+            info!(
+                "[+] vtCapture plane layout: stride={}, plane={}x{} (target: {}x{}), active={}x{}",
+                stride,
+                width,
+                height,
+                target_width,
+                target_height,
+                plane_info.active_w,
+                plane_info.active_h
+            );
+
+            // 5. Start streaming capture process
+            let ret_proc = fn_process(driver, client_ptr);
+            if ret_proc != 0 {
+                fn_stop(driver, client_ptr);
+                fn_postprocess(driver, client_ptr);
+                fn_finalize(driver, client_ptr);
+                fn_release(driver);
+                return Err(anyhow!("vtCapture_process failed with code {}", ret_proc));
+            }
+
+            info!("[+] vtCapture_process stream started successfully");
+
+            Ok(Self {
+                driver,
+                client_id,
+                width,
+                height,
+                stride,
+                rgb_buffer: vec![0; rgb_size],
+                is_stopped: false,
+                last_addr0: 0,
+                stale_count: 0,
+                raw_stats_enabled: false,
+                last_raw_stats: None,
+                fn_current_buff_info: *fn_current_buff_info,
+                fn_stop: *fn_stop,
+                fn_postprocess: *fn_postprocess,
+                fn_finalize: *fn_finalize,
+                fn_release: *fn_release,
+                _lib: lib,
+            })
+        }
+    }
+
+    /// Explicitly stops and finalizes capture to release the hardware scaler in the webOS kernel.
+    pub fn stop_stream(&mut self) {
+        if self.is_stopped || self.driver.is_null() {
+            return;
+        }
+        unsafe {
+            let client_ptr = self.client_id.as_ptr() as *const c_char;
+            (self.fn_stop)(self.driver, client_ptr);
+            (self.fn_postprocess)(self.driver, client_ptr);
+            (self.fn_finalize)(self.driver, client_ptr);
+            self.is_stopped = true;
+        }
+        info!("[-] Released vtCapture hardware scaler channel.");
+    }
+}
+
+/// Convert validated NV12 to RGBA with explicit BT.601 limited-range colourimetry.
+/// This preserves the capture assumption; TV source mode is not capture metadata.
+pub fn convert_nv12_to_rgba(
+    width: u32,
+    height: u32,
+    stride: u32,
+    y_plane: &[u8],
+    uv_plane: &[u8],
+    rgb_buffer: &mut [u8],
+) -> Result<()> {
+    let (y_len, uv_len, rgb_len) = nv12_lengths(width, height, stride)?;
+    if y_plane.len() < y_len || uv_plane.len() < uv_len || rgb_buffer.len() < rgb_len {
+        return Err(anyhow!("NV12 plane or output buffer is too short"));
+    }
+    let output_stride = width
+        .checked_mul(4)
+        .ok_or_else(|| anyhow!("RGBA stride overflow"))?;
+    let (luma, y_stride) = prepare_nv12_plane(y_plane, width as usize, stride, height as usize, 16);
+    let (chroma, uv_stride) = prepare_nv12_plane(
+        uv_plane,
+        width.div_ceil(2) as usize * 2,
+        stride,
+        height.div_ceil(2) as usize,
+        0,
+    );
+    let image = yuv::YuvBiPlanarImage {
+        y_plane: &luma,
+        y_stride,
+        uv_plane: &chroma,
+        uv_stride,
+        width,
+        height,
+    };
+    yuv::yuv_nv12_to_rgba(
+        &image,
+        &mut rgb_buffer[..rgb_len],
+        output_stride,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+        yuv::YuvConversionMode::Professional,
+    )
+    .context("NV12 BT.601 limited-range conversion failed")
+}
+
+/// yuv iterates complete stride-sized rows. Repack minimal final rows rather than silently
+/// skipping them; normalize footroom before scalar/SIMD conversion. Ordinary planes are borrowed.
+fn prepare_nv12_plane(
+    plane: &[u8],
+    row_width: usize,
+    stride: u32,
+    rows: usize,
+    minimum: u8,
+) -> (std::borrow::Cow<'_, [u8]>, u32) {
+    let full_len = (stride as usize).checked_mul(rows);
+    let needs_normalizing = minimum > 0
+        && plane
+            .chunks(stride as usize)
+            .take(rows)
+            .any(|row| row[..row_width].iter().any(|value| *value < minimum));
+    if let Some(full_len) = full_len.filter(|len| *len <= plane.len()) {
+        if !needs_normalizing {
+            return (std::borrow::Cow::Borrowed(&plane[..full_len]), stride);
+        }
+    }
+    // Dimensions and minimal row lengths were checked by nv12_lengths before this helper.
+    let mut packed = Vec::with_capacity(row_width * rows);
+    for row in plane.chunks(stride as usize).take(rows) {
+        packed.extend(row[..row_width].iter().map(|value| (*value).max(minimum)));
+    }
+    (std::borrow::Cow::Owned(packed), row_width as u32)
+}
+
+pub(super) fn nv12_lengths(width: u32, height: u32, stride: u32) -> Result<(usize, usize, usize)> {
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    let chroma_width = w
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("NV12 width overflow"))?
+        / 2
+        * 2;
+    if w == 0 || h == 0 || s < chroma_width {
+        return Err(anyhow!("invalid NV12 dimensions or stride"));
+    }
+    let y_len = (h - 1).checked_mul(s).and_then(|n| n.checked_add(w));
+    let uv_len = (h / 2 + h % 2 - 1)
+        .checked_mul(s)
+        .and_then(|n| n.checked_add(chroma_width));
+    let rgb_len = w.checked_mul(h).and_then(|n| n.checked_mul(4));
+    match (y_len, uv_len, rgb_len) {
+        (Some(y), Some(uv), Some(rgb))
+            if y <= isize::MAX as usize
+                && uv <= isize::MAX as usize
+                && rgb <= isize::MAX as usize =>
+        {
+            Ok((y, uv, rgb))
+        }
+        _ => Err(anyhow!("NV12 frame size overflow")),
+    }
+}
+
+impl ScreenCapture for VtCapture {
+    fn acquire_frame(&mut self) -> std::result::Result<CapturedFrame<'_>, CaptureError> {
+        self.last_raw_stats = None;
+        if self.is_stopped {
+            return Err(CaptureError::RestartRequired {
+                backend: "libvtcapture",
+                reason: "stream stopped",
+            });
+        }
+
+        let mut buf_info = LibVtCaptureBufferInfo {
+            start_addr0: std::ptr::null_mut(),
+            start_addr1: std::ptr::null_mut(),
+            size0: 0,
+            size1: 0,
+        };
+
+        let ret = unsafe { (self.fn_current_buff_info)(self.driver, &mut buf_info) };
+        if ret != 0 || buf_info.start_addr0.is_null() {
+            return Err(CaptureError::Unavailable(NativeCaptureError {
+                backend: "libvtcapture",
+                operation: if buf_info.start_addr0.is_null() {
+                    "vtCapture_current_capture_buff_info (null buffer)"
+                } else {
+                    "vtCapture_current_capture_buff_info"
+                },
+                code: ret,
+            }));
+        }
+
+        let curr_addr = buf_info.start_addr0 as usize;
+        if curr_addr == self.last_addr0 {
+            self.stale_count += 1;
+            // Unchanged address for > 1.5s (90 frames at 60 FPS) indicates frozen video pipe / timing change
+            if self.stale_count >= 90 {
+                warn!("Hardware capture buffer address unchanged for 1.5s: resetting pipeline to prevent display mute...");
+                self.stop_stream();
+                return Err(CaptureError::RestartRequired {
+                    backend: "libvtcapture",
+                    reason: "buffer address unchanged for 90 acquisitions",
+                });
+            }
+        } else {
+            self.last_addr0 = curr_addr;
+            self.stale_count = 0;
+        }
+
+        let (y_len, uv_len, _) = nv12_lengths(self.width, self.height, self.stride)?;
+        if buf_info.size0 < 0
+            || (buf_info.size0 as usize) < y_len
+            || (!buf_info.start_addr1.is_null()
+                && (buf_info.size1 < 0 || (buf_info.size1 as usize) < uv_len))
+        {
+            self.stop_stream();
+            return Err(anyhow!("capture driver returned undersized frame planes").into());
+        }
+        // SAFETY: the driver reports non-null plane pointers and sizes covering these slices.
+        // The capture handle remains active for the duration of this conversion.
+        let y_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr0, y_len) };
+        if !buf_info.start_addr1.is_null() {
+            let uv_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr1, uv_len) };
+            if self.raw_stats_enabled {
+                self.last_raw_stats = Some(central_nv12_stats(
+                    self.width,
+                    self.height,
+                    self.stride,
+                    y_plane,
+                    uv_plane,
+                )?);
+            }
+            convert_nv12_to_rgba(
+                self.width,
+                self.height,
+                self.stride,
+                y_plane,
+                uv_plane,
+                &mut self.rgb_buffer,
+            )?;
+        } else {
+            if self.raw_stats_enabled {
+                return Err(anyhow!("capture frame has no NV12 chroma plane").into());
+            }
+            let width = self.width as usize;
+            let stride = self.stride as usize;
+            for (row, pixels) in self.rgb_buffer.chunks_exact_mut(width * 4).enumerate() {
+                for (x, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let y_val = y_plane[row * stride + x];
+                    pixel.copy_from_slice(&[y_val, y_val, y_val, 255]);
+                }
+            }
+        }
+
+        Ok(CapturedFrame {
+            data: &self.rgb_buffer,
+            width: self.width,
+            height: self.height,
+            is_bgra: false,
+        })
+    }
+
+    fn resolution(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn is_real_hardware(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for VtCapture {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.driver.is_null() {
+                let client_ptr = self.client_id.as_ptr() as *const c_char;
+                if !self.is_stopped {
+                    (self.fn_stop)(self.driver, client_ptr);
+                    (self.fn_postprocess)(self.driver, client_ptr);
+                    (self.fn_finalize)(self.driver, client_ptr);
+                }
+                (self.fn_release)(self.driver);
+                self.driver = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vtcapture_struct_sizes() {
+        assert_eq!(std::mem::size_of::<LibVtCaptureProperties>(), 20);
+        assert_eq!(std::mem::size_of::<LibVtCapturePlaneInfo>(), 20);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(std::mem::size_of::<LibVtCaptureBufferInfo>(), 16);
+    }
+
+    #[test]
+    fn test_vtcapture_fails_gracefully_when_library_missing() {
+        let res = VtCapture::try_new(160, 90);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn central_nv12_probe_uses_only_the_centre_and_checks_plane_lengths() {
+        let (width, height, stride) = (20, 20, 22);
+        let mut y = vec![10u8; stride * height];
+        let mut uv = vec![128u8; stride * (height / 2)];
+        for row in 2..18 {
+            for col in 2..18 {
+                y[row * stride + col] = 100;
+            }
+        }
+        for row in 1..9 {
+            for col in (2..18).step_by(2) {
+                uv[row * stride + col] = 64;
+                uv[row * stride + col + 1] = 192;
+            }
+        }
+        let stats =
+            central_nv12_stats(width as u32, height as u32, stride as u32, &y, &uv).unwrap();
+        assert_eq!(stats.y_min, 100);
+        assert_eq!(stats.y_mean, 100.0);
+        assert_eq!(stats.y_max, 100);
+        assert_eq!(stats.u_mean, 64.0);
+        assert_eq!(stats.v_mean, 192.0);
+        assert_eq!(stats.luma_samples, 256);
+        assert!(
+            central_nv12_stats(width as u32, height as u32, stride as u32, &y, &uv[..20]).is_err()
+        );
+    }
+
+    #[test]
+    fn colored_nv12_fixture_locks_current_bt601_conversion() {
+        let mut rgba = [0u8; 16];
+        convert_nv12_to_rgba(2, 2, 2, &[100; 4], &[64, 192], &mut rgba).unwrap();
+        for pixel in rgba.as_chunks::<4>().0 {
+            assert_eq!(pixel, &[200, 71, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn test_nv12_conversion_black_and_white_reference() {
+        // 2x2 test image
+        let width = 2u32;
+        let height = 2u32;
+        let stride = 2u32;
+
+        // Test 1: Standard video black (Y=16, U=128, V=128)
+        let y_black = [16u8; 4];
+        let uv_neutral = [128u8; 2]; // 1 pair for 2x2 NV12
+        let mut rgb_out = [0u8; 16];
+
+        convert_nv12_to_rgba(width, height, stride, &y_black, &uv_neutral, &mut rgb_out).unwrap();
+
+        // Every pixel should decode to black (0, 0, 0, 255)
+        for pixel in rgb_out.chunks(4) {
+            assert_eq!(pixel, &[0, 0, 0, 255]);
+        }
+
+        // Test 2: Standard video white (Y=235, U=128, V=128)
+        let y_white = [235u8; 4];
+        convert_nv12_to_rgba(width, height, stride, &y_white, &uv_neutral, &mut rgb_out).unwrap();
+
+        // Every pixel should decode to full white (255, 255, 255, 255)
+        for pixel in rgb_out.chunks(4) {
+            assert_eq!(pixel, &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn test_nv12_conversion_hardware_stride_handling() {
+        // Test that a plane with stride larger than width correctly skips padding bytes
+        // 2x2 image embedded inside stride=4 buffer
+        let width = 2u32;
+        let height = 2u32;
+        let stride = 4u32;
+
+        // Row 0: [235, 235, padding, padding]
+        // Row 1: [16, 16, padding, padding]
+        let y_data = [235u8, 235u8, 0, 0, 16u8, 16u8, 0, 0];
+        // UV row 0 (applies to both Y rows): [128, 128, padding, padding]
+        let uv_data = [128u8, 128u8, 0, 0];
+        let mut rgb_out = [0u8; 16];
+
+        convert_nv12_to_rgba(width, height, stride, &y_data, &uv_data, &mut rgb_out).unwrap();
+
+        // Row 0 pixels must be white
+        assert_eq!(&rgb_out[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&rgb_out[4..8], &[255, 255, 255, 255]);
+
+        // Row 1 pixels must be black (verifying stride=4 advanced correctly to index 4)
+        assert_eq!(&rgb_out[8..12], &[0, 0, 0, 255]);
+        assert_eq!(&rgb_out[12..16], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_nv12_conversion_odd_width_boundary() {
+        // 3x2 image to test boundary condition where width is not a multiple of 2
+        let width = 3u32;
+        let height = 2u32;
+        let stride = 4u32;
+
+        let y_data = [235u8, 235u8, 235u8, 0, 16u8, 16u8, 16u8, 0];
+        let uv_data = [128u8, 128u8, 128u8, 128u8];
+        let mut rgb_out = [0u8; 24]; // 3 * 2 * 4
+
+        convert_nv12_to_rgba(width, height, stride, &y_data, &uv_data, &mut rgb_out).unwrap();
+
+        // Row 0: 3 white pixels
+        assert_eq!(&rgb_out[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&rgb_out[4..8], &[255, 255, 255, 255]);
+        assert_eq!(&rgb_out[8..12], &[255, 255, 255, 255]);
+
+        // Row 1: 3 black pixels
+        assert_eq!(&rgb_out[12..16], &[0, 0, 0, 255]);
+        assert_eq!(&rgb_out[16..20], &[0, 0, 0, 255]);
+        assert_eq!(&rgb_out[20..24], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn nv12_rejects_short_planes_and_invalid_stride() {
+        let mut output = [0u8; 16];
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 3], &[128; 2], &mut output).is_err());
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 1], &mut output).is_err());
+        assert!(convert_nv12_to_rgba(3, 2, 3, &[16; 6], &[128; 4], &mut [0; 24]).is_err());
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 2], &mut [0; 15]).is_err());
+    }
+
+    #[test]
+    fn yuv_conversion_matches_bt601_reference_and_bounds_quantization_changes() {
+        let mut max_legacy_difference = 0;
+        for y in [0u8, 15, 16, 17, 64, 100, 128, 200, 234, 235, 255] {
+            for u in [0u8, 16, 64, 128, 192, 240, 255] {
+                for v in [0u8, 16, 64, 128, 192, 240, 255] {
+                    let mut rgba = [0; 16];
+                    convert_nv12_to_rgba(2, 2, 2, &[y; 4], &[u, v], &mut rgba).unwrap();
+                    let luma = (f64::from(y.max(16)) - 16.0) * 255.0 / 219.0;
+                    let cb = (f64::from(u) - 128.0) * 255.0 / 224.0;
+                    let cr = (f64::from(v) - 128.0) * 255.0 / 224.0;
+                    let reference = [
+                        luma + 1.402 * cr,
+                        luma - (0.114 * 1.772 * cb + 0.299 * 1.402 * cr) / 0.587,
+                        luma + 1.772 * cb,
+                    ];
+                    for (actual, expected) in rgba[..3].iter().zip(reference) {
+                        assert!(
+                            actual.abs_diff(expected.round().clamp(0.0, 255.0) as u8) <= 1,
+                            "YUV={y},{u},{v}: {rgba:?}, expected={reference:?}"
+                        );
+                    }
+                    assert!(rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p == &rgba[..4] && p[3] == 255));
+                    {
+                        let c = 298 * (i32::from(y) - 16).max(0);
+                        let d = i32::from(u) - 128;
+                        let e = i32::from(v) - 128;
+                        let legacy = [
+                            (c + 409 * e + 128) >> 8,
+                            (c - 100 * d - 208 * e + 128) >> 8,
+                            (c + 516 * d + 128) >> 8,
+                        ];
+                        for (actual, old) in rgba[..3].iter().zip(legacy) {
+                            max_legacy_difference =
+                                max_legacy_difference.max(actual.abs_diff(old.clamp(0, 255) as u8));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            max_legacy_difference <= 1,
+            "legacy difference={max_legacy_difference}"
+        );
+        // Minimal last rows are valid; padding and extra destination bytes stay untouched.
+        for size in [40, 64] {
+            let mut rgba = vec![17; size];
+            convert_nv12_to_rgba(3, 3, 4, &[235; 11], &[128; 8], &mut rgba).unwrap();
+            assert!(rgba[..36]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [255, 255, 255, 255]));
+            assert!(rgba[36..].iter().all(|v| *v == 17));
+        }
+        let mut rgba = [17; 4];
+        convert_nv12_to_rgba(1, 1, u32::MAX, &[0], &[128; 2], &mut rgba).unwrap();
+        assert_eq!(rgba, [0, 0, 0, 255]);
+    }
+}
