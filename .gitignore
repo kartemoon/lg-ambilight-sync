@@ -10,6 +10,8 @@ __pycache__/
 
 # Local credentials & config
 config.json
+nanoleaf-edge-map
+music-audio
 # Atomic config temp files can contain credentials.
 *.new
 *.new-*
