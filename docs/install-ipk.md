@@ -2,14 +2,14 @@
 
 Пакет содержит приложение webOS, ARMv7-демон и встроенную русскую веб-панель. Требуется LG webOS с root-доступом, Homebrew Channel и включённым root SSH. Совместимость захвата зависит от модели и прошивки ТВ. Для торшера Govee C60B0 нужен отдельно настроенный мост ESP32-S3.
 
-1. Скачайте IPK и `SHA256SUMS` со [страницы релиза](https://github.com/kartemoon/lg-hue-sync-custom/releases/tag/v1.1.0-custom.1). В каталоге загрузки выполните `sha256sum -c SHA256SUMS`.
+1. Скачайте IPK и `SHA256SUMS` со [страницы последнего релиза](https://github.com/kartemoon/lg-hue-sync-custom/releases/latest). В каталоге загрузки выполните `sha256sum -c SHA256SUMS`.
 2. Установите IPK через [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) или командой:
 
    ```sh
-   ares-install -d TV_NAME org.webosbrew.lg-hue-sync_1.1.0_all.ipk
+   ares-install -d TV_NAME org.webosbrew.lg-hue-sync_1.1.1_all.ipk
    ```
 
-   Замените `TV_NAME` именем устройства в Ares.
+   Замените `TV_NAME` именем устройства в Ares. Используйте имя скачанного IPK, если его версия отличается от примера.
 3. Активируйте службу после установки или обновления. Замените `TV_IP` адресом телевизора и `22` портом root SSH, если он отличается.
 
    ```sh
