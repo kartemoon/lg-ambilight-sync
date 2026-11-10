@@ -396,7 +396,14 @@ async fn current_capture_compatibility(
         *last_source = source;
     }
     let settings = shared.current_settings.read().unwrap();
-    source.compatible([settings.capture_youtube, settings.capture_kinopoisk, settings.capture_lampa, settings.capture_ivi])
+    source.compatible([
+        settings.capture_youtube,
+        settings.capture_kinopoisk,
+        settings.capture_lampa,
+        settings.capture_ivi,
+        settings.capture_reelo,
+        settings.capture_okko,
+    ])
 }
 
 async fn update_nanoleaf_background(
@@ -467,7 +474,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut last_source = initial_source;
     info!("Foreground capture source: {}", initial_source.label());
     let mut source_policy =
-        CaptureSourcePolicy::new(initial_source.compatible([config.capture_youtube, config.capture_kinopoisk, config.capture_lampa, config.capture_ivi]), startup_requested);
+        CaptureSourcePolicy::new(
+            initial_source.compatible([
+                config.capture_youtube,
+                config.capture_kinopoisk,
+                config.capture_lampa,
+                config.capture_ivi,
+                config.capture_reelo,
+                config.capture_okko,
+            ]),
+            startup_requested,
+        );
     let pipeline_should_run = startup_requested && !source_policy.blocked();
     if !pipeline_should_run && hue_active {
         let _ = set_hue_stream_active(&config, false);
@@ -719,6 +736,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         capture_kinopoisk: config.capture_kinopoisk,
         capture_lampa: config.capture_lampa,
         capture_ivi: config.capture_ivi,
+        capture_reelo: config.capture_reelo,
+        capture_okko: config.capture_okko,
         nanoleaf_idle_enabled: config.nanoleaf_idle_enabled,
         nanoleaf_idle_scene: config.nanoleaf_idle_scene.clone(),
         nanoleaf_idle_colour: config.nanoleaf_idle_colour.clone(),
@@ -1287,6 +1306,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 save_cfg.capture_kinopoisk = live_st.capture_kinopoisk;
                 save_cfg.capture_lampa = live_st.capture_lampa;
                 save_cfg.capture_ivi = live_st.capture_ivi;
+                save_cfg.capture_reelo = live_st.capture_reelo;
+                save_cfg.capture_okko = live_st.capture_okko;
                 save_cfg.nanoleaf_idle_enabled = live_st.nanoleaf_idle_enabled;
                 save_cfg.nanoleaf_idle_scene = live_st.nanoleaf_idle_scene.clone();
                 save_cfg.nanoleaf_idle_colour = live_st.nanoleaf_idle_colour.clone();

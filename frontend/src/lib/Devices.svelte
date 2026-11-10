@@ -114,6 +114,18 @@
         disabled={!settings || model.busy}
         onchange={(checked) => model.patch({ capture_ivi: checked })}
       />
+      <SettingToggle
+        title="Reelo"
+        checked={settings?.capture_reelo ?? true}
+        disabled={!settings || model.busy}
+        onchange={(checked) => model.patch({ capture_reelo: checked })}
+      />
+      <SettingToggle
+        title="Okko"
+        checked={settings?.capture_okko ?? true}
+        disabled={!settings || model.busy}
+        onchange={(checked) => model.patch({ capture_okko: checked })}
+      />
     </section>
     <section class="device-subsection">
       <h2>Philips Hue</h2>

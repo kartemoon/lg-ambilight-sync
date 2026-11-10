@@ -215,6 +215,10 @@ pub struct Config {
     pub capture_lampa: bool,
     #[serde(default = "default_true")]
     pub capture_ivi: bool,
+    #[serde(default = "default_true")]
+    pub capture_reelo: bool,
+    #[serde(default = "default_true")]
+    pub capture_okko: bool,
     #[serde(default)]
     pub nanoleaf_idle_enabled: bool,
     #[serde(default)]
@@ -476,6 +480,8 @@ impl Config {
             capture_kinopoisk: true,
             capture_lampa: true,
             capture_ivi: true,
+            capture_reelo: true,
+            capture_okko: true,
             nanoleaf_idle_enabled: false,
             nanoleaf_idle_scene: String::new(),
             nanoleaf_idle_colour: crate::config::default_idle_colour(),
@@ -698,6 +704,19 @@ mod tests {
             .unwrap()
             .get("preset_overrides")
             .is_none());
+    }
+
+    #[test]
+    fn new_capture_switches_default_to_enabled_and_round_trip_independently() {
+        let mut value = serde_json::to_value(Config::new_default("", "", "", "")).unwrap();
+        let settings = value.as_object_mut().unwrap();
+        settings.remove("capture_reelo");
+        settings.remove("capture_okko");
+        let mut config: Config = serde_json::from_value(value).unwrap();
+        assert!(config.capture_reelo && config.capture_okko);
+        config.capture_reelo = false;
+        let config: Config = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+        assert!(!config.capture_reelo && config.capture_okko);
     }
 
     #[test]

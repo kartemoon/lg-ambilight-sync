@@ -25,6 +25,8 @@ export interface LiveSettings {
   capture_kinopoisk: boolean;
   capture_lampa: boolean;
   capture_ivi: boolean;
+  capture_reelo: boolean;
+  capture_okko: boolean;
   nanoleaf_idle_enabled: boolean;
   nanoleaf_idle_scene: string;
   nanoleaf_idle_colour: string;
@@ -62,6 +64,8 @@ export const initialSettings: LiveSettings = {
   capture_kinopoisk: true,
   capture_lampa: true,
   capture_ivi: true,
+  capture_reelo: true,
+  capture_okko: true,
   nanoleaf_idle_enabled: false,
   nanoleaf_idle_scene: "",
   nanoleaf_idle_colour: "#604321",

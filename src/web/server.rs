@@ -105,6 +105,10 @@ pub struct LiveSettings {
     pub capture_lampa: bool,
     #[serde(default = "default_true")]
     pub capture_ivi: bool,
+    #[serde(default = "default_true")]
+    pub capture_reelo: bool,
+    #[serde(default = "default_true")]
+    pub capture_okko: bool,
     #[serde(default)]
     pub nanoleaf_idle_enabled: bool,
     #[serde(default)]
@@ -555,7 +559,12 @@ impl SharedState {
         }
         let input = match source {
             CaptureSource::Hdmi => &diagnostics.video,
-            CaptureSource::Youtube | CaptureSource::Kinopoisk | CaptureSource::Lampa | CaptureSource::Ivi => &diagnostics.player,
+            CaptureSource::Youtube
+            | CaptureSource::Kinopoisk
+            | CaptureSource::Lampa
+            | CaptureSource::Ivi
+            | CaptureSource::Reelo
+            | CaptureSource::Okko => &diagnostics.player,
             _ => return None,
         };
         Some(input.width.is_some() && input.height.is_some())
@@ -1810,6 +1819,8 @@ mod tests {
             capture_kinopoisk: true,
             capture_lampa: true,
             capture_ivi: true,
+            capture_reelo: true,
+            capture_okko: true,
             nanoleaf_idle_enabled: false,
             nanoleaf_idle_scene: String::new(),
             nanoleaf_idle_colour: crate::config::default_idle_colour(),
